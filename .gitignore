@@ -1,0 +1,8 @@
+/__pycache__
+/.vscode
+/checkpoint/*
+
+!/checkpoint/De_happy_model_epoch_2190.pth
+
+/senet/__pycache__
+/dataset_msimaker/__pycache__

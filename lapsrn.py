@@ -9,7 +9,6 @@ from torch.nn import init
 from torch.nn.modules.utils import _single, _pair, _triple
 from thop import profile
 from colour_demosaicing import (
-    EXAMPLES_RESOURCES_DIRECTORY,
     demosaicing_CFA_Bayer_bilinear,
     demosaicing_CFA_Bayer_Malvar2004,
     demosaicing_CFA_Bayer_Menon2007,
@@ -587,6 +586,7 @@ class Net_buff(nn.Module):
     def __init__(self, msfa_size):
         super(Net, self).__init__()
         self.scale = 1
+        self.msfa_size = msfa_size
         self.outC = msfa_size**2
         self.mcm_ksize = msfa_size+2
         self.WB_Conv = nn.Conv2d(in_channels=msfa_size**2, out_channels=msfa_size**2, kernel_size=2*msfa_size-1, stride=1, padding=msfa_size-1, bias=False, groups=msfa_size**2)
@@ -686,6 +686,7 @@ class Net(nn.Module):
     def __init__(self, msfa_size):
         super(Net, self).__init__()
         self.scale = 1
+        self.msfa_size = msfa_size
         self.outC = msfa_size**2
         self.mcm_ksize = msfa_size+2
         self.WB_Conv = nn.Conv2d(in_channels=msfa_size**2, out_channels=msfa_size**2, kernel_size=2*msfa_size-1, stride=1, padding=msfa_size-1, bias=False, groups=msfa_size**2)
@@ -752,12 +753,11 @@ class Net(nn.Module):
         x, y = data
         WB_norelu = self.WB_Conv(x)
         N, C, H, W = y.size()
-        msfa_size = 5
         pos_mat = pos_mat.view(1, H, W, 2)
-        pos_mat = pos_mat[:, 0:msfa_size, 0:msfa_size, :]
-        pos_mat = pos_mat.contiguous().view(1, msfa_size ** 2, 2)
+        pos_mat = pos_mat[:, 0:self.msfa_size, 0:self.msfa_size, :]
+        pos_mat = pos_mat.contiguous().view(1, self.msfa_size ** 2, 2)
         local_weight = self.P2W(pos_mat.view(pos_mat.size(1), -1))
-        local_weight = local_weight.view(msfa_size, msfa_size, self.outC * self.mcm_ksize * self.mcm_ksize)
+        local_weight = local_weight.view(self.msfa_size, self.msfa_size, self.outC * self.mcm_ksize * self.mcm_ksize)
         local_weight1 = local_weight.clone()
         cols = nn.functional.unfold(y, self.mcm_ksize, padding=(self.mcm_ksize - 1) // 2)
         cols = cols.contiguous().view(cols.size(0), 1, cols.size(1), cols.size(2),
@@ -765,11 +765,11 @@ class Net(nn.Module):
 
         h_pattern_n = 1
         # This h_pattern_n can divide H / msfa_size as a int
-        local_weight1 = local_weight1.repeat(h_pattern_n, int(W / msfa_size), 1)
-        local_weight1 = local_weight1.view(h_pattern_n * msfa_size * W, self.outC * self.mcm_ksize * self.mcm_ksize)
+        local_weight1 = local_weight1.repeat(h_pattern_n, int(W / self.msfa_size), 1)
+        local_weight1 = local_weight1.view(h_pattern_n * self.msfa_size * W, self.outC * self.mcm_ksize * self.mcm_ksize)
         local_weight1 = local_weight1.contiguous().view(1, h_pattern_n * msfa_size * W, -1, self.outC)
-        for i in range(0, int(H / msfa_size / h_pattern_n)):
-            cols_buff = cols[:, 0, i * msfa_size * h_pattern_n * W:(i + 1) * msfa_size * h_pattern_n * W, :, :]
+        for i in range(0, int(H / self.msfa_size / h_pattern_n)):
+            cols_buff = cols[:, 0, i * self.msfa_size * h_pattern_n * W:(i + 1) * self.msfa_size * h_pattern_n * W, :, :]
             if i == 0:
                 Raw_conv_buff = torch.matmul(cols_buff, local_weight1)
             else:
@@ -955,7 +955,7 @@ class Net_St(nn.Module):
         x, y = data
         WB_norelu = self.WB_Conv(x)
         N, C, H, W = y.size()
-        msfa_size = 5
+        
         pos_mat = pos_mat.view(1, H, W, 2)
         pos_mat = pos_mat[:, 0:msfa_size, 0:msfa_size, :]
         pos_mat = pos_mat.contiguous().view(1, msfa_size ** 2, 2)
@@ -1154,7 +1154,7 @@ class Net_MC_LSA(nn.Module):
         WB_norelu = self.WB_Conv(x)
 
         N, C, H, W = y.size()
-        msfa_size = 5
+        
         pos_mat = pos_mat.view(1, H, W, 2)
         pos_mat = pos_mat[:, 0:msfa_size, 0:msfa_size, :]
         pos_mat = pos_mat.contiguous().view(1, msfa_size**2, 2)
@@ -2111,7 +2111,7 @@ class Net_WO_WB(nn.Module):
     def forward(self, data, pos_mat):
         x, y = data
         N, C, H, W = y.size()
-        msfa_size = 5
+        
         pos_mat = pos_mat.view(1, H, W, 2)
         pos_mat = pos_mat[:, 0:msfa_size, 0:msfa_size, :]
         pos_mat = pos_mat.contiguous().view(1, msfa_size ** 2, 2)
@@ -2371,6 +2371,8 @@ class Mpattern_opt(nn.Module):
             self.mcm_ksize = msfa_size+2
         elif msfa_size == 4:
             self.mcm_ksize = msfa_size + 1
+        elif msfa_size == 3:
+                self.mcm_ksize = msfa_size+2
         self.WB_Conv = nn.Conv2d(in_channels=msfa_size**2, out_channels=msfa_size**2, kernel_size=2*msfa_size-1, stride=1, padding=msfa_size-1, bias=False, groups=msfa_size**2)
         self.P2W = Pos2Weight(outC=self.outC, kernel_size=self.mcm_ksize)
         if att_type == 'HSA':
@@ -2437,32 +2439,40 @@ class Mpattern_opt(nn.Module):
 
     def forward(self, data, pos_mat):
         x, y = data
+        
+        # Controllo di sicurezza canali per [B, H, W, C] -> [B, C, H, W]
+        if x.dim() == 4 and x.shape[-1] <= 25 and x.shape[1] > 25:
+            x = x.permute(0, 3, 1, 2)
+        if y.dim() == 4 and y.shape[-1] <= 25 and y.shape[1] > 25:
+            y = y.permute(0, 3, 1, 2)
+
         WB_norelu = self.WB_Conv(x)
         N, C, H, W = y.size()
-        # print(H, W)
+        
+        # Adattamento dinamico basato su self.msfa_size anziché valori fissi
         pos_mat = pos_mat.view(1, H, W, 2)
         pos_mat = pos_mat[:, 0:self.msfa_size, 0:self.msfa_size, :]
         pos_mat = pos_mat.contiguous().view(1, self.msfa_size ** 2, 2)
+        
         local_weight = self.P2W(pos_mat.view(pos_mat.size(1), -1))
         local_weight = local_weight.view(self.msfa_size, self.msfa_size, self.outC * self.mcm_ksize * self.mcm_ksize)
         local_weight1 = local_weight.clone()
+        
         cols = nn.functional.unfold(y, self.mcm_ksize, padding=(self.mcm_ksize - 1) // 2)
         cols = cols.contiguous().view(cols.size(0), 1, cols.size(1), cols.size(2),
                                       1).permute(0, 1, 3, 4, 2).contiguous()
 
         h_pattern_n = 1
-        # This h_pattern_n can divide H / msfa_size as a int
         local_weight1 = local_weight1.repeat(h_pattern_n, int(W / self.msfa_size), 1)
-        # print(local_weight1.size())
-        # print(h_pattern_n, self.msfa_size, W)
         local_weight1 = local_weight1.view(h_pattern_n * self.msfa_size * W, self.outC * self.mcm_ksize * self.mcm_ksize)
         local_weight1 = local_weight1.contiguous().view(1, h_pattern_n * self.msfa_size * W, -1, self.outC)
+        
+        raw_conv_list = []
         for i in range(0, int(H / self.msfa_size / h_pattern_n)):
             cols_buff = cols[:, 0, i * self.msfa_size * h_pattern_n * W:(i + 1) * self.msfa_size * h_pattern_n * W, :, :]
-            if i == 0:
-                Raw_conv_buff = torch.matmul(cols_buff, local_weight1)
-            else:
-                Raw_conv_buff = torch.cat([Raw_conv_buff, torch.matmul(cols_buff, local_weight1)], dim=-3)
+            raw_conv_list.append(torch.matmul(cols_buff, local_weight1))
+        
+        Raw_conv_buff = torch.cat(raw_conv_list, dim=-3)
 
         Raw_conv_buff = torch.unsqueeze(Raw_conv_buff, 0)
         Raw_conv_buff = Raw_conv_buff.permute(0, 1, 4, 2, 3)
@@ -2593,6 +2603,8 @@ class Mpattern_opt_fast2(nn.Module):
             self.mcm_ksize = msfa_size+2
         elif msfa_size == 4:
             self.mcm_ksize = msfa_size + 1
+        elif msfa_size == 3:
+            self.mcm_ksize = msfa_size+2
         self.WB_Conv = nn.Conv2d(in_channels=msfa_size**2, out_channels=msfa_size**2, kernel_size=2*msfa_size-1, stride=1, padding=msfa_size-1, bias=False, groups=msfa_size**2)
         self.P2W = Pos2Weight(outC=self.outC, kernel_size=self.mcm_ksize)
         self.MosaicConv = nn.Conv2d(in_channels=msfa_size**2, out_channels=self.outC*msfa_size**2, kernel_size=self.mcm_ksize, stride=msfa_size, padding=0, bias=False, groups=msfa_size**2)

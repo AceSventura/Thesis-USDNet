@@ -1,5 +1,7 @@
 import argparse, os
+import math
 import torch
+import gc
 import random
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
@@ -15,28 +17,29 @@ from math import log10
 from Spectral_demosaicing import input_matrix_wpn as input_matrix_wpn_msfasize, get_datetime_str
 import numpy
 import numpy as np
+from GenericFolderDataset import GenericFolderDataset
 
 # Training settings
 parser = argparse.ArgumentParser(description="unsupervised spectral demosaicing")
 parser.add_argument("--cuda", action="store_true", help="Use cuda?")
 parser.add_argument("--resume", default="", type=str, help="Path to checkpoint (default: none)")
 parser.add_argument("--start-epoch", default=1, type=int, help="Manual epoch number (useful on restarts)")
-parser.add_argument("--threads", type=int, default=0, help="Number of threads for data loader to use, Default: 1")
+parser.add_argument("--threads", type=int, default=2, help="Number of threads for data loader to use, Default: 1")
 parser.add_argument("--momentum", default=0.9, type=float, help="Momentum, Default: 0.9")
 parser.add_argument("--weight-decay", "--wd", default=1e-4, type=float, help="weight decay, Default: 1e-4")
 parser.add_argument("--pretrained", default="", type=str, help="path to pretrained model (default: none)")
-parser.add_argument('--msfa_size', '-uf',  type=int, default=5, help="the size of square msfa")
-parser.add_argument("--dataset", default="ICVL", type=str, help="dataset. Can be NTIRE/ICVL/Mosaic25")
+parser.add_argument('--msfa_size', '-uf',  type=int, default=3, help="the size of square msfa")
+parser.add_argument("--dataset", default="Flavia", type=str, help="dataset. Can be NTIRE/ICVL/Mosaic25")
 parser.add_argument("--model", default="LSA", type=str, help="model. Can be LSA/HSA/SE/St")
 parser.add_argument("--train_type", default="EItrain", type=str, help="EItrain or Suptrain or mixSuptrain")
 
 def main() -> object:
 
     global opt, model
-    os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+    #os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     opt = parser.parse_args()
     opt.norm_flag = False
-    opt.augment_flag = False
+    opt.augment_flag = True
     opt.lr_drate = 0.5
     opt.alpha = 1
     opt.step_num = 1
@@ -54,11 +57,14 @@ def main() -> object:
             opt.batchSize = 1
             opt.nEpochs = 14000
             opt.save_interval = 100
-
+        elif opt.dataset == "Flavia":
+            opt.batchSize = 20
+            opt.nEpochs = 4000
+            opt.save_interval = 10
         opt.lr = 1e-4
         opt.step = 100000
         opt.tran_type = 'random' # can be globalshift / random
-        opt.save_dir = 'checkpoint/'+opt.dataset+'_'+opt.model + '_' + str(opt.msfa_size) + '_' +opt.train_type+'_Trans' + opt.tran_type + '_alpha' + str(opt.alpha)+ '_st' + str(opt.step_num) + '_'+opt.dt + '/'
+        opt.save_dir = 'checkpoint/'+opt.dataset+'_V2_'+opt.model + '_' + str(opt.msfa_size) + '_' +opt.train_type+'_Trans' + opt.tran_type + '_alpha' + str(opt.alpha)+ '_st' + str(opt.step_num) + '_'+opt.dt + '/'
     elif opt.train_type == 'Suptrain':
         opt.batchSize = 32
         opt.nEpochs = 7500
@@ -109,9 +115,19 @@ def main() -> object:
                                                      opt.norm_flag, patch_size=opt.train_ps)
         test_set = get_test_set_opt("/data2/fk/dataset/TT59/TT59_600_875_nossfnorm_01norm/test_small",
                                     opt.msfa_size, opt.norm_flag, opt.val_ps)
-
-    training_data_loader = DataLoader(dataset=train_set, batch_size=opt.batchSize, shuffle=True, num_workers=4)
-    testing_data_loader = DataLoader(dataset=test_set, batch_size=1, shuffle=False, num_workers=4)
+    elif opt.dataset == 'Flavia':
+        opt.norm_flag = True
+        opt.train_ps = 60
+        opt.val_ps = 510
+        msfa_layout = [0, 5, 2, 3, 8, 7, 6, 1, 4]
+        train_set = GenericFolderDataset("/mnt/Volume_Interno/UBUNTU/dataset_flavia/train",
+                                         opt.msfa_size, msfa_layout, opt.norm_flag, opt.train_ps, augment=False, type='train')
+        test_set = GenericFolderDataset("/mnt/Volume_Interno/UBUNTU/dataset_flavia/valid",
+                                        opt.msfa_size, msfa_layout, opt.norm_flag, opt.val_ps, augment=False, type='test')
+    #persisent = False
+    #num_workers = getattr(opt, 'threads', 0)
+    training_data_loader = DataLoader(dataset=train_set, batch_size=opt.batchSize, shuffle=True, num_workers=4, pin_memory=True)
+    testing_data_loader = DataLoader(dataset=test_set, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
 
     print(opt)
@@ -169,9 +185,11 @@ def main() -> object:
     save_opt(opt)
     print("===> Training")
     results = {'im_loss': [], 're_loss': [], 'all_loss': [], 'psnr': []}
+    last_psnr = 0.0
     for epoch in range(opt.start_epoch, opt.nEpochs + 1):
-        # if epoch % 50 == 1:
-        test_results = test(testing_data_loader, optimizer, model, criterion, criterion1, epoch, opt.nEpochs, opt.msfa_size)
+        if epoch == opt.start_epoch or epoch % opt.save_interval == 0:
+            test_results = test(testing_data_loader, optimizer, model, criterion, criterion1, epoch, opt.nEpochs, opt.msfa_size)
+            last_psnr = test_results['psnr'] / test_results['batch_sizes'] / opt.msfa_size ** 2
         if opt.train_type == 'EItrain':
             running_results = train_EI_optstep(training_data_loader, optimizer, model, criterion, criterion1, epoch, opt.nEpochs, opt.msfa_size, opt)
         elif opt.train_type == 'Suptrain':
@@ -180,15 +198,19 @@ def main() -> object:
         results['im_loss'].append(running_results['im_loss'] / running_results['batch_sizes'])
         results['re_loss'].append(running_results['re_loss'] / running_results['batch_sizes'])
         results['all_loss'].append(running_results['all_loss'] / running_results['batch_sizes'])
-        results['psnr'].append(test_results['psnr'] / test_results['batch_sizes'] / opt.msfa_size ** 2)
+        results['psnr'].append(last_psnr)
         if epoch % opt.save_interval == 0:
             save_checkpoint(model, epoch)
         if epoch!=0:
             save_statistics(opt, results, epoch)
 
 def adjust_learning_rate(optimizer, epoch):
-    """Sets the learning rate to the initial LR decayed by 10 every 10 epochs"""
-    lr = opt.lr * (opt.lr_drate ** (epoch // opt.step))
+    """Set a cosine-annealed learning rate for the current epoch."""
+    min_lr = 1e-6
+    total_epochs = max(1, opt.nEpochs - 1)
+    progress = min(max(epoch, 0), total_epochs) / total_epochs
+    cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+    lr = min_lr + (opt.lr - min_lr) * cosine_factor
     return lr
 
 def train_EI_optstep(training_data_loader, optimizer, model, criterion, criterion1, epoch, num_epochs, msfa_size, opt):
@@ -390,17 +412,20 @@ def test(testing_data_loader, optimizer, model, criterion, criterion1, epoch, nu
     model.eval()
 
     with torch.no_grad():
-        # for batch in training_data_loader:
         for batch in test_bar:
-        # for batch_num, (input_raw, input, target) in enumerate(training_data_loader):
-
-            input_raw, input, label_x4 = Variable(batch[0]), Variable(batch[1]), Variable(batch[2], requires_grad=False)
-            # batch_size = batch[0].shape[0]
-            # running_results['batch_sizes'] += batch_size
-            N, C, H, W = batch[0].size()
-            # input_raw, input, label_x4 = input_raw.to(device_flag),input.to(device_flag), target.to(device_flag)
-            # N, C, H, W  = target.shape
+            # Controllo di sicurezza e aggiunta della dimensione batch se mancante
+            raw_tensor = batch[0]
+            if raw_tensor.dim() == 3:
+                raw_tensor = raw_tensor.unsqueeze(0)
+            
+            N, C, H, W = raw_tensor.size()
             test_results['batch_sizes'] += N
+
+            input_raw, input, label_x4 = Variable(raw_tensor), Variable(batch[1]), Variable(batch[2], requires_grad=False)
+            if input.dim() == 3:
+                input = input.unsqueeze(0)
+            if label_x4.dim() == 3:
+                label_x4 = label_x4.unsqueeze(0)
 
             scale_coord_map = input_matrix_wpn_msfasize(H, W, msfa_size)
 
@@ -434,16 +459,36 @@ def test(testing_data_loader, optimizer, model, criterion, criterion1, epoch, nu
             #     HR_4x = model([input, raw_cube], scale_coord_map)
             # else:
 
+            # Generazione della predizione dal modello
             HR_4x = model([input, input_raw], scale_coord_map)
 
-            for nbatch in range(N):
-                for nb in range(msfa_size**2):
-                    sb_mse = ((HR_4x[nbatch, nb, :, :] - label_x4[nbatch, nb, :, :]) ** 2).data.mean()
-                    psnr = 10 * log10(1 / sb_mse.item())
-                    test_results['psnr'] += psnr
+            # --- CONTROLLO DI SICUREZZA DIMENSIONALE ---
+            # Assicuriamoci che HR_4x sia nel formato [N, C, H, W]
+            if HR_4x.dim() == 4 and HR_4x.shape[-1] == 9:
+                HR_4x = HR_4x.permute(0, 3, 1, 2)
+            if label_x4.dim() == 4 and label_x4.shape[-1] == 9:
+                label_x4 = label_x4.permute(0, 3, 1, 2)
 
-            test_bar.set_description(desc='[%d/%d] psnr: %.4f ' % (
-            epoch, num_epochs, test_results['psnr']/test_results['batch_sizes']/(msfa_size**2)))
+            # Se per qualsiasi motivo le dimensioni spaziali differiscono di pochi pixel (es 438 vs 440),
+            # ritagliamo entrambe alla dimensione minima comune per evitare crash di mismatch
+            min_h = min(HR_4x.shape[2], label_x4.shape[2])
+            min_w = min(HR_4x.shape[3], label_x4.shape[3])
+            HR_4x = HR_4x[:, :, :min_h, :min_w]
+            label_x4 = label_x4[:, :, :min_h, :min_w]
+            # --------------------------------------------
+
+            mse = (HR_4x - label_x4).square().mean(dim=(2, 3))
+            psnr = torch.where(
+                mse > 0,
+                10 * torch.log10(1.0 / mse),
+                torch.full_like(mse, 100.0),
+            )
+            test_results['psnr'] += psnr.sum().item()
+
+            test_log_val = test_results['psnr'] / max(1, test_results['batch_sizes'] * (msfa_size**2))
+            test_bar.set_description(desc='[%d/%d] psnr: %.4f' % (epoch, num_epochs, test_log_val))
+            torch.cuda.empty_cache()
+            gc.collect()
     return test_results
 
 def transform_opt(HR_4x, msfa_size, opt):
@@ -473,7 +518,7 @@ def transform_opt(HR_4x, msfa_size, opt):
         else:
             new_lable = torch.flip(HR_4x, [3])
 
-    scale_lib = [0.2, 0.25, 0.5, 2, 3, 4]
+    scale_lib = [0.2, 0.25, 0.5, 1.5, 2, 3]
 
     if tran_type == 3:
         ## resize transf
